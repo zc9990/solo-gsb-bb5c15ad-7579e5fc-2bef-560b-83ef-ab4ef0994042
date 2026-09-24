@@ -46,6 +46,15 @@ manifest（或直接上传 **CycloneDX JSON** SBOM），系统会：
     展示新增及最短路径变化的冲突（附两侧路径）、剩余未解析项与冲突数净变化；
     引用或目标无效、补成自依赖或重复边返回明确错误（422）；预演为纯只读操作，
     **不创建审计、不改动复核标记**，原生 manifest 与 CycloneDX 审计均可使用。
+12. **最少断边分析** —— 在网页第 7 节选定一条已保存审计中的冲突或告警后（或调用
+    `GET /api/audits/{id}/edgecut/{conflict_id}`），沿审计保存的现有
+    **使用方 → 被依赖方** 图，计算要让该条冲突的祖先包无法再到达被依赖包所需删除的
+    **最少依赖边**（有向图 s-t 最小边割：单位容量 Edmonds-Karp 最大流 = 最小割）：
+    返回一组**确定性**的建议断边集合与数量，并给出同等数量的「边不相交」见证路径
+    （并行路径、汇合路径与依赖环都纳入计算，不只处理当前最短路径）；
+    网页展示原最短路径、建议断边（标出落在原最短路径上的边）与断边后是否仍可达。
+    审计或冲突/告警不存在时返回明确错误（404）；分析为纯只读操作，
+    **不改动原审计结果与复核标记**，原生 manifest 与 CycloneDX 审计均可使用。
 
 ## 快速开始（Docker Compose，一键启动，推荐）
 
@@ -62,7 +71,7 @@ docker compose up --build          # 前台启动（加 -d 可后台运行）
 
 | 地址 | 说明 |
 | --- | --- |
-| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演） |
+| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演，第 7 节可对单条冲突做最少断边分析） |
 | <http://localhost:8000/docs> | Swagger 风格交互式 JSON API 文档 |
 | <http://localhost:8000/redoc> | ReDoc API 文档 |
 | <http://localhost:8000/api/matrix> | 许可证兼容矩阵（机器可读） |
@@ -210,6 +219,7 @@ $ curl -s -X POST http://localhost:8000/api/audit -H "Content-Type: application/
 | GET | `/api/audits/{id}/retire?retire=a@1&retire=b@2` | **根包退役预演**（只读；不带参数返回根包列表） |
 | GET | `/api/audits/{id}/relicense?package=a@1&license=MIT` | **单包许可证替换预演**（只读；不带参数返回可选包与候选许可证列表） |
 | GET | `/api/audits/{id}/edgefix?source=a@1&reference=x@2&target=x@1` | **未解析依赖补边预演**（只读；不带参数返回源包仍存在的未解析引用与目标包列表） |
+| GET | `/api/audits/{id}/edgecut/{conflict_id}` | **最少断边分析**（只读；返回让祖先包无法再到达被依赖包的确定性最少断边集合） |
 | DELETE | `/api/audits/{id}` | 删除审计记录（不影响复核标记） |
 | POST | `/api/reviews` | **创建复核标记**（按审计中的冲突条目，跨审计生效） |
 | GET | `/api/reviews?state=active&fingerprint=…` | 复核标记记录列表（可按状态/指纹筛选） |
@@ -474,6 +484,91 @@ HTTP/1.1 422 Unprocessable Entity
 已依赖的目标），点击「预演补边」即可查看净变化统计、新增及路径变化的冲突
 （含两侧最短路径）与剩余未解析项，可反复更换选择重新预演。
 
+### 最少断边分析接口
+
+对一条已保存审计中的冲突/告警（祖先包 `ancestor` 沿依赖边约束到被依赖包
+`node`），沿审计保存的现有依赖图（**使用方 → 被依赖方**）计算：要让祖先包
+**无法再到达**被依赖包，至少要删除哪几条、多少条依赖边。这是有向图上的
+**s-t 最小边割**问题，按最大流最小割定理实现：
+
+- 每条现有依赖边容量为 1，用 **Edmonds-Karp（BFS 增广）** 求
+  `ancestor → node` 的最大流，最大流流量即**最少断边数**；
+- 在最大流残量网络上从祖先包做 BFS，原边中「起点可达、终点不可达」的边
+  构成一组**确定性**的最小割边（邻接顺序按审计中边的声明顺序，结果可复现）；
+- **并行路径**（多条边不相交路径，需各断一条）、**汇合路径**（多条路径共享
+  的瓶颈边，断一条即可）与**依赖环**都在残量网络中自然处理，不只看当前最短路径；
+- 返回同等数量的「边不相交」见证路径（每条都恰好被一条建议边截断），
+  并在删除建议边后的图上重算 BFS 验证目标确实不再可达。
+
+```bash
+curl http://localhost:8000/api/audits/1/edgecut/C007
+```
+
+返回内容（节选）：
+
+- `conflict` —— 被分析的冲突/告警条目（id、严重程度、双方许可证与原最短路径信息）；
+- `reachable_before` / `original_shortest_path` / `original_distance` ——
+  断边前祖先包可达被依赖包，以及**原审计的最短依赖路径**与跳数；
+- `cut_count` —— **最少断边数**（等于最大流与边不相交路径数）；
+- `cut_edges` —— 一组确定性的建议删除边：`source` / `target` /
+  `on_original_shortest_path`（该边是否落在原最短路径上）/ `from`（边来源）；
+- `edge_disjoint_paths_count` / `edge_disjoint_paths` ——
+  与最少断边数同量的两两边不相交可达路径，说明为什么少于该数量无法切断；
+- `reachable_after` —— 删除全部建议边后祖先包是否仍能到达被依赖包（成功时为
+  `false`），`residual_shortest_path` 为断边后残留路径（成功时为空），
+  `reachable_after_count` 为断边后祖先包仍可达的包数；
+- `verification` —— 自洽校验：最小割边数=最大流、边不相交路径数=最大流、
+  断边后目标不可达；`deterministic` 恒为 `true`。
+
+```json
+{
+  "kind": "minimum-edge-cut",
+  "read_only": true,
+  "deterministic": true,
+  "source": "web-app@2.1.0",
+  "target": "legacy-math@0.3.0",
+  "reachable_before": true,
+  "original_shortest_path": ["web-app@2.1.0", "billing-core@1.2.0", "legacy-math@0.3.0"],
+  "original_distance": 2,
+  "cut_count": 1,
+  "cut_edges": [
+    {"source": "billing-core@1.2.0", "target": "legacy-math@0.3.0",
+     "id": "billing-core@1.2.0 -> legacy-math@0.3.0",
+     "from": "package-dependencies", "on_original_shortest_path": true}
+  ],
+  "edge_disjoint_paths_count": 1,
+  "edge_disjoint_paths": [["web-app@2.1.0", "billing-core@1.2.0", "legacy-math@0.3.0"]],
+  "reachable_after": false,
+  "residual_shortest_path": [],
+  "verification": {"mincut_equals_maxflow": true,
+                   "edge_disjoint_paths_equals_maxflow": true,
+                   "target_unreachable_after_removal": true}
+}
+```
+
+并行路径示例：祖先经 `p1→p2` 与 `q1→q2` 两条边不相交路径到达目标时
+`cut_count` 为 2；两条路径若汇合到共享节点 `m` 后只经 `m→目标` 离开，
+则只需删除 `m→目标` 一条边（汇合瓶颈）。
+
+分析是**只读**操作，不会创建审计或改动复核标记；原生 manifest 与 CycloneDX
+审计结果均可直接使用。错误情形返回明确信息：
+
+```bash
+$ curl -i http://localhost:8000/api/audits/999/edgecut/C001
+HTTP/1.1 404 Not Found
+{"detail":"审计记录不存在：999。最少断边分析为只读操作，不会创建新审计。"}
+
+$ curl -i http://localhost:8000/api/audits/1/edgecut/C999
+HTTP/1.1 404 Not Found
+{"detail":"审计 #1 中不存在冲突/告警条目：C999。"}
+```
+
+网页端在第 7 节每条冲突/告警卡片上点击「✂ 最少断边分析」即可：
+页面展示原最短路径（落在上面的建议断边以红色波浪线标出）、建议删除边清单
+（区分原最短路径上的边与并行/汇合路径上的边）、边不相交见证路径（折叠区）
+以及断边后是否仍可达的徽标与残留路径；可对任意条目反复分析，
+审计结果与复核标记都不会被改动。
+
 ## 审计结果结构（节选）
 
 ```json
@@ -531,20 +626,21 @@ CycloneDX 导入的审计结果结构相同，另带 `"source_format": "cycloned
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI 路由（JSON API + 网页，含两次审计对比与复核标记接口）
+│   ├── main.py        # FastAPI 路由（JSON API + 网页，含对比/复核/预演/最少断边接口）
 │   ├── analyzer.py    # manifest 解析、节点规范化、传递约束、最短路径（自动路由 CycloneDX）
 │   ├── cyclonedx.py   # CycloneDX JSON 导入：bom-ref 映射节点、ref/dependsOn 还原依赖边
 │   ├── compare.py     # 两次审计对比：节点/冲突配对与变化检测（纯只读）
 │   ├── retire.py      # 根包退役预演：从剩余根包重算可达集合（纯只读）
 │   ├── relicense.py   # 单包许可证替换预演：替换一个节点许可证后沿原图重算并配对（纯只读）
 │   ├── edgefix.py     # 未解析依赖补边预演：补一条边并移除所选未解析项后重算并配对（纯只读）
+│   ├── edgecut.py     # 最少断边分析：Edmonds-Karp 最大流/最小割，确定性断边集合（纯只读）
 │   ├── reviews.py     # 复核标记：指纹计算、失效时间规范化、审计结果附着
 │   ├── licenses.py    # 许可证别名规范化与兼容矩阵
 │   └── database.py    # SQLite 初始化与审计记录/复核标记持久化
 ├── static/
 │   ├── index.html     # 单文件网页（无外部 CDN 依赖）
 │   └── examples/      # sample-manifest.json 与 sample-cyclonedx.json 两个内置示例
-├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_retire / test_relicense / test_edgefix
+├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_retire / test_relicense / test_edgefix / test_edgecut
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

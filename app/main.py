@@ -16,6 +16,7 @@ from . import (
     analyzer,
     compare as compare_mod,
     database,
+    edgecut as edgecut_mod,
     edgefix as edgefix_mod,
     licenses,
     relicense as relicense_mod,
@@ -219,6 +220,29 @@ def edgefix_rehearsal(
         )
     try:
         return edgefix_mod.rehearse_edgefix(result, source, reference, target)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get(
+    "/api/audits/{audit_id}/edgecut/{conflict_id}",
+    tags=["audit"],
+    summary="最少断边分析（只读）：求让祖先包无法再到达被依赖包的最少依赖边集合",
+)
+def edgecut_analysis(audit_id: int, conflict_id: str) -> Dict[str, Any]:
+    result = database.get_audit(audit_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="审计记录不存在：%s。最少断边分析为只读操作，不会创建新审计。" % audit_id,
+        )
+    try:
+        return edgecut_mod.analyze_cut(result, conflict_id)
+    except edgecut_mod.ConflictNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="审计 #%s 中不存在冲突/告警条目：%s。" % (audit_id, conflict_id),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

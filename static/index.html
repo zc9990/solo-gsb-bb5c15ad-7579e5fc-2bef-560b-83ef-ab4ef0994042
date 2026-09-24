@@ -119,6 +119,24 @@
   }
   .review-box button { padding: 6px 12px; font-size: 12px; }
   .review-box .note { flex: 1 1 100%; }
+  .edgecut-box {
+    margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px;
+  }
+  .edgecut-box > .row { margin-top: 8px; }
+  .edgecut-box button { padding: 6px 12px; font-size: 12px; }
+  .path .cut-edge { color: var(--err); font-weight: 700; text-decoration: underline wavy var(--err); }
+  .cut-list { margin: 6px 0; display: flex; flex-direction: column; gap: 6px; }
+  .cut-edge-item {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    border: 1px solid var(--line); border-left: 3px solid var(--err);
+    border-radius: 6px; padding: 6px 10px; background: #fcf5f5;
+  }
+  .cut-edge-item.alternate { border-left-color: var(--brand); background: #f3f7fd; }
+  .cut-edge-item .mono { font-size: 12px; }
+  .edgecut-summary { font-size: 13px; margin: 8px 0 4px; }
+  .edgecut-witness { font-size: 12px; }
+  .badge.reach-no { background: var(--ok-bg); color: var(--ok); }
+  .badge.reach-yes { background: var(--err-bg); color: var(--err); }
 </style>
 </head>
 <body>
@@ -249,6 +267,8 @@
       <div class="hint" style="margin-bottom:10px;">
         复核标记按「祖先节点 + 被依赖节点 + 双方规范化许可证」生成指纹，跨审计生效：
         同一冲突在任意历史审计中重现都会带出同一条标记；许可证变更、标记过期或撤销后自动回到待复核。
+        每条冲突还可做<b>最少断边分析</b>：沿现有 使用方→被依赖方 图求让祖先包无法再到达被依赖包所需删除的
+        <b>最少依赖边</b>（并行路径、汇合路径与环均纳入计算，不只看当前最短路径），展示原最短路径、建议断边与断边后可达性。
       </div>
       <div id="conflicts"></div>
     </div>
@@ -360,7 +380,122 @@ function renderConflicts(result) {
       <div class="reason">${esc(c.reason)}</div>
       <div class="path">${renderPath(c.path)}</div>
       ${reviewBox(c)}
+      ${edgecutBox(c)}
     </div>`).join("");
+}
+
+// --- 最少断边分析 -------------------------------------------------------------
+
+function edgecutBox(c) {
+  return '<div class="edgecut-box"><div class="row">' +
+    '<button class="secondary" onclick="runEdgecut(\'' + c.id + '\', this)">✂ 最少断边分析</button>' +
+    '<span class="hint">计算让 ' + esc(c.ancestor) + " 无法再到达 " + esc(c.node) +
+    " 所需删除的最少依赖边（并行/汇合/环均计入，只读，不改动审计与复核标记）</span>" +
+    "</div>" +
+    '<div id="edgecut-' + c.id + '" class="hidden-block" style="margin-top:10px;"></div></div>';
+}
+
+function renderEdgecutPath(path, cutPairs) {
+  const pairs = cutPairs || [];
+  return '<div class="path">' + path.map((nid, i) => {
+    const node = (currentResult.nodes || []).find((n) => n.id === nid);
+    const lic = node ? node.license_display : "";
+    let label = esc(nid) + (lic ? ' <span class="muted">[' + esc(lic) + "]</span>" : "");
+    if (i < path.length - 1 && pairs.some((pr) => pr[0] === nid && pr[1] === path[i + 1])) {
+      label = '<span class="cut-edge">' + label + "</span>";
+    }
+    return label;
+  }).join('<span class="arrow">→</span>') + "</div>";
+}
+
+async function runEdgecut(conflictId, btn) {
+  if (!currentResult) return;
+  clearReviewAlert();
+  const box = $("edgecut-" + conflictId);
+  box.className = "";
+  box.innerHTML = '<span class="hint">正在沿现有依赖图计算最大流/最小割…</span>';
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/audits/" + currentResult.audit_id + "/edgecut/" +
+      encodeURIComponent(conflictId));
+    const data = await resp.json();
+    if (!resp.ok) {
+      box.className = "hidden-block";
+      showReviewAlert(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+      return;
+    }
+    renderEdgecutResult(conflictId, data);
+  } catch (e) {
+    box.className = "hidden-block";
+    showReviewAlert("最少断边分析请求失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderEdgecutResult(conflictId, d) {
+  const cutPairs = (d.cut_edges || []).map((e) => [e.source, e.target]);
+  let html = "";
+  const sevBadge = d.conflict.severity === "error"
+    ? '<span class="badge conflict">硬冲突</span>'
+    : '<span class="badge warning">需人工确认</span>';
+  html += '<div class="edgecut-summary">' + sevBadge + " " + esc(d.conflict.id) +
+    " · 让 <span class='mono'><b>" + esc(d.source) + "</b></span> 无法再到达 " +
+    "<span class='mono'><b>" + esc(d.target) + "</b></span>，最少需要删除 " +
+    '<b style="color:var(--err);font-size:15px;">' + d.cut_count + "</b> 条依赖边" +
+    " · 删除后可达性 " +
+    (d.reachable_after
+      ? '<span class="badge reach-yes">仍可达（异常）</span>'
+      : '<span class="badge reach-no">已不可达 ✓</span>') +
+    "</div>";
+
+  // 原最短路径（标红落在上面的建议断边）
+  html += '<div class="path-label"><span class="tag base">原审计</span>原最短依赖路径（' +
+    (d.original_distance) + " 跳）</div>" +
+    renderEdgecutPath(d.original_shortest_path || [], cutPairs);
+
+  // 建议断边
+  html += '<div class="path-label" style="margin-top:10px;">建议删除的依赖边（确定性最小割，共 ' +
+    d.cut_count + " 条；" + d.cut_edges_on_original_shortest_path + " 条落在原最短路径上）</div>";
+  if (d.cut_edges.length) {
+    html += '<div class="cut-list">' + d.cut_edges.map((e, i) =>
+      '<div class="cut-edge-item' + (e.on_original_shortest_path ? "" : " alternate") + '">' +
+      '<span class="pill">#' + (i + 1) + "</span>" +
+      '<span class="mono"><b>' + esc(e.source) + "</b> → <b>" + esc(e.target) + "</b></span>" +
+      (e.on_original_shortest_path ? '<span class="badge conflict">在原最短路径上</span>'
+                                   : '<span class="pill">并行/汇合路径上的边</span>') +
+      (e.from ? '<span class="hint">边来源：' + esc(e.from) + "</span>" : "") +
+      "</div>"
+    ).join("") + "</div>";
+  } else {
+    html += '<p class="muted">无需删除任何边：' + esc(d.source) + " 当前本就无法到达 " +
+      esc(d.target) + "。</p>";
+  }
+
+  // 边不相交见证路径（数量=最少断边数），折叠展示
+  if (d.edge_disjoint_paths_count) {
+    html += '<details class="edgecut-witness"><summary>为什么是 ' + d.cut_count +
+      " 条？查看 " + d.edge_disjoint_paths_count + " 条两两边不相交的可达路径" +
+      "（每条都必须被至少一条建议边截断）</summary>" +
+      d.edge_disjoint_paths.map((p, i) =>
+        '<div class="path-label" style="margin-top:6px;"><span class="pill">边不相交路径 #' +
+        (i + 1) + "（" + (p.length - 1) + " 跳）</span></div>" + renderEdgecutPath(p, cutPairs)
+      ).join("") + "</details>";
+  }
+
+  // 断边后可达性
+  html += '<div class="path-label" style="margin-top:10px;">删除建议边后的可达性</div>';
+  if (d.reachable_after) {
+    html += '<div class="path">' + renderEdgecutPath(d.residual_shortest_path || [], cutPairs) + "</div>";
+  } else {
+    html += '<p style="margin:4px 0;"><span class="badge reach-no">已不可达 ✓</span> ' +
+      '<span class="hint">从 ' + esc(d.source) + " 出发可达 " + d.reachable_after_count +
+      " 个包，其中不包含 " + esc(d.target) + "。</span></p>";
+  }
+  html += '<div class="hint" style="margin-top:8px;">' + esc(d.method) +
+    " 本分析为只读操作，不改动审计结果与复核标记。</div>";
+
+  $("edgecut-" + conflictId).innerHTML = html;
 }
 
 // --- 跨审计复核标记 -----------------------------------------------------------
