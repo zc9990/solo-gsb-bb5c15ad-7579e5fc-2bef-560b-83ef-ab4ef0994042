@@ -97,6 +97,12 @@
   .diff-arrow { color: var(--muted); padding: 0 6px; font-weight: 400; }
   .path.base b { color: var(--err); }
   .path.target b { color: var(--ok); }
+  .path .cut-mark { color: var(--err); font-weight: 700; padding: 0 2px; }
+  .path .cut-node { background: var(--err-bg); border-radius: 3px; padding: 0 2px; }
+  .cut-row-cut { color: var(--err); font-weight: 700; }
+  .reach-bad { color: var(--ok); font-weight: 700; }
+  .reach-still { color: var(--err); font-weight: 700; }
+  button.tiny { padding: 4px 10px; font-size: 11px; font-weight: 600; }
   .path-label { font-size: 11px; color: var(--muted); margin: 6px 0 2px; }
   .path-label .tag {
     font-size: 10px; padding: 0 6px; border-radius: 4px; margin-right: 6px; font-weight: 700;
@@ -220,10 +226,29 @@
     <div id="edgefix-result" class="hidden-block" style="margin-top:18px;"></div>
   </section>
 
+  <section class="card">
+    <h2>6. 最少断边分析 <span class="pill">只读 · 不创建审计</span></h2>
+    <div id="mincut-alert" class="alert"></div>
+    <div class="row">
+      <select id="mincut-audit"></select>
+      <select id="mincut-conflict"></select>
+      <button id="btn-mincut" disabled>计算最少断边</button>
+    </div>
+    <div class="hint" style="margin-top:8px;">
+      选定一条已保存审计中的冲突/告警后，服务端沿现有 <b>使用方 → 被依赖方</b> 依赖图，
+      计算要让该条冲突的祖先包无法再到达被依赖包所需删除的<b>最少依赖边</b>
+      （每条依赖边容量 1 的最大流 / Menger 定理，等价于最大边不相交路径数）：
+      <b>并行路径</b>必须逐条打断、<b>汇合路径</b>会自动选出共享瓶颈边、<b>依赖环</b>不影响结果，
+      不能只处理当前最短路径。页面展示原最短路径、一组确定性的建议断边及断边后是否仍可达。
+      分析为只读操作，不会创建审计或改动复核标记。
+    </div>
+    <div id="mincut-result" class="hidden-block" style="margin-top:18px;"></div>
+  </section>
+
   <section id="result" class="hidden-block">
     <div class="card">
       <div class="row" style="justify-content:space-between;">
-        <h2 style="margin:0;">6. 审计结果 <span id="r-name" class="muted" style="font-weight:400;font-size:13px;"></span></h2>
+        <h2 style="margin:0;">7. 审计结果 <span id="r-name" class="muted" style="font-weight:400;font-size:13px;"></span></h2>
         <span id="r-status"></span>
       </div>
       <div class="stats" style="margin-top:14px;">
@@ -244,17 +269,18 @@
     </div>
 
     <div class="card">
-      <h2>7. 冲突与最短依赖路径 <span id="review-stats" class="pill" style="font-weight:400;"></span></h2>
+      <h2>8. 冲突与最短依赖路径 <span id="review-stats" class="pill" style="font-weight:400;"></span></h2>
       <div id="review-alert" class="alert"></div>
       <div class="hint" style="margin-bottom:10px;">
         复核标记按「祖先节点 + 被依赖节点 + 双方规范化许可证」生成指纹，跨审计生效：
         同一冲突在任意历史审计中重现都会带出同一条标记；许可证变更、标记过期或撤销后自动回到待复核。
+        每条冲突可直接点击「最少断边」跳到第 6 节分析。
       </div>
       <div id="conflicts"></div>
     </div>
 
     <div class="card">
-      <h2>8. 节点与传递约束</h2>
+      <h2>9. 节点与传递约束</h2>
       <div style="overflow-x:auto;">
       <table id="nodes-table">
         <thead><tr><th>节点</th><th>版本</th><th>许可证</th><th>约束来源（传递）</th><th>硬冲突</th></tr></thead>
@@ -264,7 +290,7 @@
     </div>
 
     <div class="card">
-      <h2>9. 告警与未解析依赖</h2>
+      <h2>10. 告警与未解析依赖</h2>
       <div id="warnings"></div>
     </div>
   </section>
@@ -356,6 +382,7 @@ function renderConflicts(result) {
         ${reviewBadge(c)}
         <span class="mono"><b>${esc(c.ancestor)}</b> ── ${esc(c.ancestor_license)} → ${esc(c.node_license)} ── <b>${esc(c.node)}</b></span>
         <span class="pill">最短路径 ${c.distance} 跳 · ${c.id}</span>
+        <button class="secondary tiny" onclick="analyzeMincutShortcut('${c.id}')">✂ 最少断边</button>
       </div>
       <div class="reason">${esc(c.reason)}</div>
       <div class="path">${renderPath(c.path)}</div>
@@ -559,7 +586,7 @@ async function loadAuditList() {
     showCompareAlert(e.message);
     return [];
   }
-  const prev = { base: $("cmp-base").value, target: $("cmp-target").value, retire: $("retire-audit").value, relicense: $("relicense-audit").value, edgefix: $("edgefix-audit").value };
+  const prev = { base: $("cmp-base").value, target: $("cmp-target").value, retire: $("retire-audit").value, relicense: $("relicense-audit").value, edgefix: $("edgefix-audit").value, mincut: $("mincut-audit").value };
   const fill = (sel, selected) => {
     sel.innerHTML = "";
     const placeholder = document.createElement("option");
@@ -579,6 +606,7 @@ async function loadAuditList() {
   fill($("retire-audit"), prev.retire || (items.length ? String(items[0].id) : ""));
   fill($("relicense-audit"), prev.relicense || (items.length ? String(items[0].id) : ""));
   fill($("edgefix-audit"), prev.edgefix || (items.length ? String(items[0].id) : ""));
+  fill($("mincut-audit"), prev.mincut || (items.length ? String(items[0].id) : ""));
   // 首次加载默认选最新两条（列表为倒序：items[0] 最新）
   if (!prev.base && items.length) $("cmp-base").value = String(items[0].id);
   // 退役预演的根包列表随审计选择联动加载
@@ -609,6 +637,14 @@ async function loadAuditList() {
     $("edgefix-target").innerHTML = "";
     $("edgefix-result").className = "hidden-block";
     $("btn-edgefix").disabled = true;
+  }
+  // 最少断边分析的冲突/告警列表随审计选择联动加载
+  if ($("mincut-audit").value) {
+    loadMincutConflicts();
+  } else {
+    $("mincut-conflict").innerHTML = "";
+    $("mincut-result").className = "hidden-block";
+    $("btn-mincut").disabled = true;
   }
   return items;
 }
@@ -1180,6 +1216,178 @@ $("btn-edgefix").addEventListener("click", async () => {
     $("btn-edgefix").disabled = false;
   }
 });
+
+// --- 最少断边分析 -----------------------------------------------------------
+
+let mincutNodeMap = {};  // 节点 id -> 节点（渲染路径时标注许可证）
+
+function showMincutAlert(msg) {
+  const el = $("mincut-alert");
+  el.textContent = msg;
+  el.className = "alert error show";
+}
+function clearMincutAlert() { $("mincut-alert").className = "alert"; }
+
+async function loadMincutConflicts() {
+  clearMincutAlert();
+  const aid = $("mincut-audit").value;
+  const sel = $("mincut-conflict");
+  $("mincut-result").className = "hidden-block";
+  $("mincut-result").innerHTML = "";
+  sel.innerHTML = "";
+  if (!aid) { $("btn-mincut").disabled = true; return; }
+  let data;
+  try {
+    const resp = await fetch("/api/audits/" + aid);
+    data = await resp.json();
+    if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+  } catch (e) {
+    showMincutAlert("加载审计冲突列表失败：" + e.message);
+    $("btn-mincut").disabled = true;
+    return;
+  }
+  mincutNodeMap = {};
+  (data.nodes || []).forEach((n) => { mincutNodeMap[n.id] = n; });
+  const conflicts = data.conflicts || [];
+  if (!conflicts.length) {
+    sel.innerHTML = "<option value=''>（该审计没有冲突/告警，无需断边分析）</option>";
+    $("btn-mincut").disabled = true;
+    return;
+  }
+  conflicts.forEach((c) => {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = c.id + " · " + (c.severity === "error" ? "硬冲突" : "告警") +
+      " · " + c.ancestor + " → " + c.node + "（最短 " + c.distance + " 跳）";
+    sel.appendChild(opt);
+  });
+  $("btn-mincut").disabled = false;
+}
+
+function mincutNodeLabel(nid, cls) {
+  const node = mincutNodeMap[nid];
+  const lic = node ? node.license_display : "";
+  return '<span class="' + (cls || "") + '">' + esc(nid) +
+    (lic ? ' <span class="muted">[' + esc(lic) + "]</span>" : "") + "</span>";
+}
+
+function renderMincutPath(path, cutEdges) {
+  // cutEdges: Set<"source->target">，断边前的节点高亮、断边处打红色标记
+  const parts = [];
+  for (let i = 0; i < path.length; i++) {
+    const isCut = i < path.length - 1 && cutEdges.has(path[i] + "->" + path[i + 1]);
+    parts.push(mincutNodeLabel(path[i], isCut ? "cut-node" : ""));
+    if (i < path.length - 1) {
+      parts.push('<span class="arrow">→</span>');
+      if (isCut) parts.push('<span class="cut-mark" title="建议在此断开依赖边">✂</span><span class="arrow">→</span>');
+    }
+  }
+  return '<div class="path">' + parts.join("") + "</div>";
+}
+
+function renderMincutResult(data) {
+  const cutEdges = new Set((data.cut_edges || []).map((e) => e.source + "->" + e.target));
+  const s = data.source, t = data.target;
+  let html = '<div class="meta-line">审计 <span class="mono">#' + esc(String(data.audit.audit_id)) + " · " +
+    esc(data.audit.manifest_name || "") + '</span> · 冲突条目 <b>' + esc(data.conflict_id) + "</b> · 算法 " +
+    esc(data.algorithm) + '（单位容量最大流 / Menger 定理）</div>';
+
+  html += '<div class="row" style="margin:6px 0 12px;">' +
+    '<span class="badge ' + (data.conflict.severity === "error" ? "conflict" : "warning") + '">' +
+    (data.conflict.severity === "error" ? "硬冲突" : "需人工确认") + "</span>" +
+    '<span class="mono"><b>' + esc(s.id) + "</b> ── " + esc(data.conflict.ancestor_license) +
+    " → " + esc(data.conflict.node_license) + " ── <b>" + esc(t.id) + "</b></span></div>";
+
+  const reachAfter = data.reachable_after;
+  html += '<div class="stats">' +
+    '<div class="stat"><div class="num" style="color:var(--err)">' + data.cut_count + '</div><div class="label">最少断边数</div></div>' +
+    '<div class="stat"><div class="num">' + data.edge_disjoint_path_count + '</div><div class="label">边不相交路径数（并行路径）</div></div>' +
+    '<div class="stat"><div class="num">' + (data.original_distance) + "</div><div class='label'>原最短路径跳数</div></div>" +
+    '<div class="stat"><div class="num ' + (reachAfter ? "reach-still" : "reach-bad") + '">' +
+    (reachAfter ? "仍可达 ⚠" : "不可达 ✓") + "</div><div class='label'>删除建议边后的可达性</div></div>" +
+    '<div class="stat"><div class="num">' + data.graph.nodes + " / " + data.graph.edges + '</div><div class="label">分析图节点 / 边</div></div>' +
+    "</div>";
+
+  // 原最短路径
+  html += '<div class="path-label"><span class="tag base">原最短路径</span>祖先包 ' + esc(s.id) +
+    " 到被依赖包 " + esc(t.id) + "（" + data.original_distance + " 跳；断边位置以 ✂ 标注）</div>";
+  html += renderMincutPath(data.original_shortest_path, cutEdges);
+
+  // 建议断边表
+  html += '<h3 style="margin:16px 0 8px;font-size:14px;">✂ 建议删除的依赖边（最少 ' + data.cut_count +
+    ' 条，确定性结果）</h3>';
+  if (data.cut_edges.length) {
+    html += '<div style="overflow-x:auto;"><table><thead><tr><th>#</th><th>使用方 → 被依赖方</th><th>原最短路径</th><th>所属并行路径</th><th>边来源</th></tr></thead><tbody>';
+    html += data.cut_edges.map((e, i) =>
+      "<tr><td class='mono'>" + (i + 1) + "</td>" +
+      '<td class="mono cut-row-cut">' + mincutNodeLabel(e.source) +
+      ' <span class="cut-mark">→</span> ' + mincutNodeLabel(e.target) + "</td>" +
+      "<td>" + (e.on_original_path ? '<span class="badge conflict">在原最短路径上</span>' : '<span class="muted">否（另有并行/汇合路径）</span>') + "</td>" +
+      "<td>" + (e.flow_path ? '<span class="pill">边不相交路径 #' + e.flow_path + "</span>" : '<span class="muted">—</span>') + "</td>" +
+      '<td class="mono muted">' + esc(e.from || "") + "</td></tr>"
+    ).join("");
+    html += "</tbody></table></div>";
+  } else {
+    html += '<p class="muted">祖先包本就无法到达被依赖包，无需断边。</p>';
+  }
+
+  // 边不相交路径
+  if (data.edge_disjoint_paths && data.edge_disjoint_paths.length) {
+    html += '<h3 style="margin:16px 0 8px;font-size:14px;">🛣️ 最大边不相交路径（' +
+      data.edge_disjoint_path_count + ' 条；每条至少须断一边）</h3>';
+    html += data.edge_disjoint_paths.map((p, i) =>
+      '<div class="path-label"><span class="tag target">路径 #' + (i + 1) + "</span>" + (p.length - 1) + " 跳</div>" +
+      renderMincutPath(p, cutEdges)
+    ).join("");
+  }
+
+  // 断边后可达性
+  html += '<h3 style="margin:16px 0 8px;font-size:14px;">🔎 断边后可达性校验</h3>';
+  html += reachAfter
+    ? '<p class="reach-still">删除上述边后 ' + esc(s.id) + " 仍可到达 " + esc(t.id) + "（异常：请检查图数据）。</p>"
+    : '<p class="reach-bad">✓ 删除上述 ' + data.cut_count + " 条边后，" + esc(s.id) + " 已无法沿任何依赖路径（含并行、汇合与环路径）到达 " + esc(t.id) + "。</p>";
+  if (!data.verified) {
+    html += '<p class="diff-remove">校验标记 verified=false：' + esc(JSON.stringify(data.checks)) + "</p>";
+  }
+
+  const box = $("mincut-result");
+  box.innerHTML = html;
+  box.className = "";
+}
+
+async function analyzeMincut(aid, conflictId) {
+  clearMincutAlert();
+  if (!aid) { showMincutAlert("请先选择一条审计记录。"); return; }
+  if (!conflictId) { showMincutAlert("请选择要分析的冲突/告警条目。"); return; }
+  $("btn-mincut").disabled = true;
+  try {
+    const resp = await fetch("/api/audits/" + aid + "/mincut/" + encodeURIComponent(conflictId));
+    const data = await resp.json();
+    if (!resp.ok) {
+      showMincutAlert(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+      return;
+    }
+    renderMincutResult(data);
+  } catch (e) {
+    showMincutAlert("最少断边分析请求失败：" + e.message);
+  } finally {
+    $("btn-mincut").disabled = false;
+  }
+}
+
+async function analyzeMincutShortcut(conflictId) {
+  // 从第 8 节冲突卡片跳转：自动选中当前结果对应审计与冲突并分析
+  if (!currentResult || !currentResult.audit_id) return;
+  $("mincut-audit").value = String(currentResult.audit_id);
+  await loadMincutConflicts();
+  $("mincut-conflict").value = conflictId;
+  $("mincut-result").scrollIntoView({ behavior: "smooth", block: "start" });
+  await analyzeMincut(String(currentResult.audit_id), conflictId);
+}
+
+$("mincut-audit").addEventListener("change", loadMincutConflicts);
+$("btn-mincut").addEventListener("click", () =>
+  analyzeMincut($("mincut-audit").value, $("mincut-conflict").value));
 
 // 自动载入示例，便于首次访问
 $("btn-sample").click();

@@ -18,6 +18,7 @@ from . import (
     database,
     edgefix as edgefix_mod,
     licenses,
+    mincut as mincut_mod,
     relicense as relicense_mod,
     retire as retire_mod,
     reviews as reviews_mod,
@@ -221,6 +222,24 @@ def edgefix_rehearsal(
         return edgefix_mod.rehearse_edgefix(result, source, reference, target)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get(
+    "/api/audits/{audit_id}/mincut/{conflict_id}",
+    tags=["audit"],
+    summary="最少断边分析（只读）：求祖先包→被依赖包的最小边割",
+)
+def mincut_analysis(audit_id: int, conflict_id: str) -> Dict[str, Any]:
+    result = database.get_audit(audit_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="审计记录不存在：%s。最少断边分析为只读操作，不会创建新审计。" % audit_id,
+        )
+    try:
+        return mincut_mod.analyze_mincut(result, conflict_id)
+    except mincut_mod.ConflictNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.get("/api/audits/{audit_id}", tags=["audit"], summary="获取某次审计结果（支持按包筛选/导出）")

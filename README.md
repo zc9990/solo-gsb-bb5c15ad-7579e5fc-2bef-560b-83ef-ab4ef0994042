@@ -46,6 +46,17 @@ manifest（或直接上传 **CycloneDX JSON** SBOM），系统会：
     展示新增及最短路径变化的冲突（附两侧路径）、剩余未解析项与冲突数净变化；
     引用或目标无效、补成自依赖或重复边返回明确错误（422）；预演为纯只读操作，
     **不创建审计、不改动复核标记**，原生 manifest 与 CycloneDX 审计均可使用。
+12. **最少断边分析** —— 在网页第 6 节选择一条已保存审计及其某条冲突/告警
+    （或在第 8 节冲突卡片上点「✂ 最少断边」一键跳转，亦可调
+    `GET /api/audits/{id}/mincut/{conflict_id}`），服务端沿现有
+    **使用方 → 被依赖方** 依赖图，计算要让该条冲突的祖先包无法再到达被依赖包
+    所需删除的**最少依赖边数与一组确定性的边集合**：基于每条依赖边容量 1 的最大流
+    （Dinic）与有向 Menger 定理（最大流值 = 最大边不相交路径数 = 最少断边数），
+    **并行路径**必须逐条打断、**汇合路径**自动选出共享瓶颈边、**有向环**不影响结果，
+    绝不只处理当前最短路径。页面与 API 返回原最短路径、建议断边（标注是否在原最短
+    路径上、所属边不相交路径）、边不相交路径明细及**删边后是否仍可达**的独立校验；
+    审计或冲突不存在返回明确错误（404）；分析为纯只读操作，**不创建审计、不改动
+    复核标记**，原生 manifest 与 CycloneDX 审计均可使用。
 
 ## 快速开始（Docker Compose，一键启动，推荐）
 
@@ -62,7 +73,7 @@ docker compose up --build          # 前台启动（加 -d 可后台运行）
 
 | 地址 | 说明 |
 | --- | --- |
-| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演） |
+| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演，第 6 节可做最少断边分析，第 8 节冲突卡片也可一键发起断边分析） |
 | <http://localhost:8000/docs> | Swagger 风格交互式 JSON API 文档 |
 | <http://localhost:8000/redoc> | ReDoc API 文档 |
 | <http://localhost:8000/api/matrix> | 许可证兼容矩阵（机器可读） |
@@ -210,6 +221,7 @@ $ curl -s -X POST http://localhost:8000/api/audit -H "Content-Type: application/
 | GET | `/api/audits/{id}/retire?retire=a@1&retire=b@2` | **根包退役预演**（只读；不带参数返回根包列表） |
 | GET | `/api/audits/{id}/relicense?package=a@1&license=MIT` | **单包许可证替换预演**（只读；不带参数返回可选包与候选许可证列表） |
 | GET | `/api/audits/{id}/edgefix?source=a@1&reference=x@2&target=x@1` | **未解析依赖补边预演**（只读；不带参数返回源包仍存在的未解析引用与目标包列表） |
+| GET | `/api/audits/{id}/mincut/{conflict_id}` | **最少断边分析**（只读；返回确定性的最小边割与删边后可达性） |
 | DELETE | `/api/audits/{id}` | 删除审计记录（不影响复核标记） |
 | POST | `/api/reviews` | **创建复核标记**（按审计中的冲突条目，跨审计生效） |
 | GET | `/api/reviews?state=active&fingerprint=…` | 复核标记记录列表（可按状态/指纹筛选） |
@@ -319,7 +331,7 @@ curl http://localhost:8000/api/reviews/1                          # 单条记录
 curl -X POST http://localhost:8000/api/reviews/1/revoke           # 撤销（保留记录，条目回到待复核）
 ```
 
-网页端在第 5 节每条冲突卡片上直接展示「待复核 / 已复核」徽标：待复核条目可填写
+网页端在第 8 节每条冲突卡片上直接展示「待复核 / 已复核」徽标：待复核条目可填写
 复核备注与失效时间后一键打标，已复核条目显示备注、失效时间并提供「撤销标记」按钮，
 操作后列表自动刷新。删除审计记录不会删除复核标记（标记按指纹跨审计生效）。
 
@@ -474,6 +486,83 @@ HTTP/1.1 422 Unprocessable Entity
 已依赖的目标），点击「预演补边」即可查看净变化统计、新增及路径变化的冲突
 （含两侧最短路径）与剩余未解析项，可反复更换选择重新预演。
 
+### 最少断边分析接口
+
+对一条已保存审计中的冲突/告警，沿现有 **使用方 → 被依赖方** 依赖图，
+计算让该条冲突的祖先包（`ancestor`）无法再到达被依赖包（`node`）所需删除的
+**最少依赖边**，并给出一组确定性的边集合（一个 s-t 最小边割）：
+
+```bash
+curl http://localhost:8000/api/audits/1/mincut/C007
+```
+
+算法：把每条依赖边视为容量 1 的有向弧，用 Dinic 求 `ancestor → node` 的最大流，
+再取源侧残量可达集合的出边作为割集。由有向 Menger 定理，**最大流值 =
+最大边不相交路径数 = 最少断边数**：
+
+- **并行路径**——两条互不共边的路径必须各断一条，断边数等于并行度，
+  不能只断当前 BFS 最短路径上的一条；
+- **汇合路径**——多条路径共享同一条瓶颈边时，割集会自动选中该共享边
+  （一条顶多条）；
+- **有向环**——最大流与残量 BFS 只走正残量弧，环不改变最大流值与割集；
+  流分解遇到环时会先摘除环。
+
+返回内容：
+
+- `source` / `target` —— 祖先包与被依赖包的节点信息（许可证等）；
+- `original_shortest_path` / `original_distance` —— 原审计中的**最短依赖路径**
+  与跳数（原冲突内容原样携带于 `conflict`，不改动审计）；
+- `cut_count` / `cut_edges` —— **最少断边数与确定性边集合**，每条边标注
+  `on_original_path`（是否在原最短路径上）、`flow_path`（所属边不相交路径序号）
+  与边来源 `from`；割边按 `(source, target)` 字典序返回，结果与边存储顺序无关；
+- `edge_disjoint_path_count` / `edge_disjoint_paths` —— 一组最大边不相交路径
+  （每条至少要断一边，用于说明“为什么不能只处理最短路径”）；
+- `reachable_before` / `reachable_after` —— 删边前后祖先包是否仍可到达
+  被依赖包；`reachable_after=false` 即断边成功，由独立 BFS 复核；
+- `verified` / `checks` —— 割大小等于最大流、路径边不相交且删边后不可达
+  三项内部校验全部通过时为 `true`。
+
+```json
+{
+  "kind": "minimum-edge-cut",
+  "read_only": true,
+  "algorithm": "dinic-max-flow",
+  "conflict_id": "C007",
+  "reachable_before": true,
+  "original_shortest_path": ["web-app@2.1.0", "billing-core@1.2.0", "legacy-math@0.3.0"],
+  "original_distance": 2,
+  "cut_count": 1,
+  "cut_edges": [
+    {"source": "billing-core@1.2.0", "target": "legacy-math@0.3.0",
+     "from": "package-dependencies", "on_original_path": true, "flow_path": 1}
+  ],
+  "edge_disjoint_path_count": 1,
+  "edge_disjoint_paths": [["web-app@2.1.0", "billing-core@1.2.0", "legacy-math@0.3.0"]],
+  "reachable_after": false,
+  "verified": true
+}
+```
+
+当存在并行路径时，`cut_count` 会大于 1，且通常只有一部分割边位于原最短路径上
+（其余割边对应并行/汇合路径）。审计不存在返回 `404`；审计存在但冲突 id
+不存在同样返回 `404` 并指出可选范围：
+
+```bash
+$ curl -i http://localhost:8000/api/audits/9999/mincut/C001
+HTTP/1.1 404 Not Found
+{"detail":"审计记录不存在：9999。最少断边分析为只读操作，不会创建新审计。"}
+
+$ curl -i http://localhost:8000/api/audits/1/mincut/C9999
+HTTP/1.1 404 Not Found
+{"detail":"审计 #1 中不存在冲突条目：C9999。请从该审计的冲突/告警列表中选择（共 13 条）。"}
+```
+
+分析是**只读**操作，不创建审计、不改写已保存审计 JSON、不改动复核标记；
+原生 manifest 与 CycloneDX 审计结果均可直接使用。网页端在第 6 节选择审计与
+冲突条目后点击「计算最少断边」即可（第 8 节每条冲突卡片上的
+「✂ 最少断边」按钮会自动选中并滚动到该节）：页面展示原最短路径（断边位置以
+✂ 标注）、建议断边表、边不相交路径与删边后可达性结论。
+
 ## 审计结果结构（节选）
 
 ```json
@@ -538,13 +627,14 @@ CycloneDX 导入的审计结果结构相同，另带 `"source_format": "cycloned
 │   ├── retire.py      # 根包退役预演：从剩余根包重算可达集合（纯只读）
 │   ├── relicense.py   # 单包许可证替换预演：替换一个节点许可证后沿原图重算并配对（纯只读）
 │   ├── edgefix.py     # 未解析依赖补边预演：补一条边并移除所选未解析项后重算并配对（纯只读）
+│   ├── mincut.py      # 最少断边分析：祖先包→被依赖包的最小边割（Dinic/Menger，纯只读）
 │   ├── reviews.py     # 复核标记：指纹计算、失效时间规范化、审计结果附着
 │   ├── licenses.py    # 许可证别名规范化与兼容矩阵
 │   └── database.py    # SQLite 初始化与审计记录/复核标记持久化
 ├── static/
 │   ├── index.html     # 单文件网页（无外部 CDN 依赖）
 │   └── examples/      # sample-manifest.json 与 sample-cyclonedx.json 两个内置示例
-├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_retire / test_relicense / test_edgefix
+├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_retire / test_relicense / test_edgefix / test_mincut
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
